@@ -18,6 +18,19 @@ const memoryUsers = new Map();
 const memorySessions = new Map();
 const memoryData = new Map();
 
+async function ensureMemoryDemo(){
+  if(pool) return;
+  const email='acesso2@droppro.app';
+  if(!memoryUsers.has(email)){
+    const id=crypto.randomUUID();
+    memoryUsers.set(email,{
+      id,
+      email,
+      passwordHash:await bcrypt.hash('Droppro2026',12)
+    });
+    memoryData.set(id,defaultData());
+  }
+}
 app.disable('x-powered-by');
 app.use(helmet({ contentSecurityPolicy:false }));
 app.use(express.json({ limit:'1mb' }));
@@ -52,7 +65,7 @@ function cookieOptions(){return {httpOnly:true,sameSite:'lax',secure:process.env
 async function getUser(req){
   const token=req.cookies.droppro_session; if(!token) return null;
   if(pool){const r=await db('SELECT u.id,u.email FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.token=$1 AND s.expires_at>NOW()',[token]);return r?.rows[0]||null;}
-  const s=memorySessions.get(token); return s&&s.expires>Date.now()?memoryUsers.get(s.userId):null;
+  const s=memorySessions.get(token); return s&&s.expires>Date.now()?memoryUsers.get(s.email):null;
 }
 async function requireAuth(req,res,next){req.user=await getUser(req);if(!req.user)return res.status(401).json({error:'Não autenticado'});next();}
 async function readData(userId){if(pool){const r=await db('SELECT data FROM user_data WHERE user_id=$1',[userId]);return r?.rows[0]?.data||defaultData();}return memoryData.get(userId)||defaultData();}
@@ -60,7 +73,7 @@ async function writeData(userId,data){if(pool){await db('INSERT INTO user_data(u
 
 app.get('/api/health',(req,res)=>res.json({ok:true,service:'DropPro',version:'2.0.0'}));
 app.post('/api/auth/signup',async(req,res)=>{try{const email=String(req.body.email||'').trim().toLowerCase(),password=String(req.body.password||'');if(!/^\S+@\S+\.\S+$/.test(email)||password.length<8)return res.status(400).json({error:'Informe um e-mail válido e senha com pelo menos 8 caracteres.'});if(pool){const exists=await db('SELECT 1 FROM users WHERE email=$1',[email]);if(exists.rows.length)return res.status(409).json({error:'E-mail já cadastrado.'});const id=crypto.randomUUID(),hash=await bcrypt.hash(password,12);await db('INSERT INTO users(id,email,password_hash) VALUES($1,$2,$3)',[id,email,hash]);await db('INSERT INTO user_data(user_id,data) VALUES($1,$2)',[id,JSON.stringify(defaultData())]);return loginUser(res,{id,email});}const id=crypto.randomUUID();if(memoryUsers.has(email))return res.status(409).json({error:'E-mail já cadastrado.'});memoryUsers.set(email,{id,email,passwordHash:await bcrypt.hash(password,12)});memoryData.set(id,defaultData());return loginUser(res,memoryUsers.get(email));}catch(e){res.status(500).json({error:'Falha ao criar conta.'});}});
-async function loginUser(res,user){const token=crypto.randomBytes(32).toString('hex'),expires=Date.now()+7*24*60*60*1000;if(pool)await db('INSERT INTO sessions(token,user_id,expires_at) VALUES($1,$2,NOW()+INTERVAL \'7 days\')',[token,user.id]);else memorySessions.set(token,{userId:user.id,expires});res.cookie('droppro_session',token,cookieOptions());res.json({user:{id:user.id,email:user.email}});}
+async function loginUser(res,user){const token=crypto.randomBytes(32).toString('hex'),expires=Date.now()+7*24*60*60*1000;if(pool)await db('INSERT INTO sessions(token,user_id,expires_at) VALUES($1,$2,NOW()+INTERVAL \'7 days\')',[token,user.id]);else memorySessions.set(token,{email:user.email,expires});res.cookie('droppro_session',token,cookieOptions());res.json({user:{id:user.id,email:user.email}});}
 app.post('/api/auth/login',async(req,res)=>{const email=String(req.body.email||'').trim().toLowerCase(),password=String(req.body.password||'');if(pool){const r=await db('SELECT id,email,password_hash FROM users WHERE email=$1',[email]);if(!r?.rows[0]||!(await bcrypt.compare(password,r.rows[0].password_hash)))return res.status(401).json({error:'E-mail ou senha inválidos.'});return loginUser(res,r.rows[0]);}const u=memoryUsers.get(email);if(!u||!(await bcrypt.compare(password,u.passwordHash)))return res.status(401).json({error:'E-mail ou senha inválidos.'});return loginUser(res,u);});
 app.post('/api/auth/logout',async(req,res)=>{const token=req.cookies.droppro_session;if(token){if(pool)await db('DELETE FROM sessions WHERE token=$1',[token]);else memorySessions.delete(token);}res.clearCookie('droppro_session');res.json({ok:true});});
 app.get('/api/auth/me',async(req,res)=>{const u=await getUser(req);res.json({user:u?{id:u.id,email:u.email}:null});});
@@ -75,4 +88,4 @@ app.get('/oauth/bling/start',requireAuth,(req,res)=>{const client=process.env.BL
 app.get('/oauth/bling/callback',(req,res)=>res.send('Bling: callback recebido. Configure as credenciais OAuth no servidor para concluir a troca do código por token.'));
 
 app.use((req,res)=>res.sendFile(path.join(__dirname,'public','index.html')));
-initDb().then(()=>app.listen(PORT,()=>console.log(`DropPro rodando na porta ${PORT}`))).catch(e=>{console.error(e);process.exit(1)});
+initDb().then(ensureMemoryDemo).then(()=>app.listen(PORT,()=>console.log(`DropPro rodando na porta ${PORT}`))).catch(e=>{console.error(e);process.exit(1)});
